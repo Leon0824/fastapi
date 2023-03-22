@@ -110,10 +110,7 @@ def get_param_sub_dependant(
     *, param: inspect.Parameter, path: str, security_scopes: Optional[List[str]] = None
 ) -> Dependant:
     depends: params.Depends = param.default
-    if depends.dependency:
-        dependency = depends.dependency
-    else:
-        dependency = param.annotation
+    dependency = depends.dependency or param.annotation
     return get_sub_dependant(
         depends=depends,
         dependency=dependency,
@@ -213,17 +210,15 @@ def get_flat_params(dependant: Dependant) -> List[ModelField]:
 
 def is_scalar_field(field: ModelField) -> bool:
     field_info = field.field_info
-    if not (
-        field.shape == SHAPE_SINGLETON
-        and not lenient_issubclass(field.type_, BaseModel)
-        and not lenient_issubclass(field.type_, sequence_types + (dict,))
-        and not isinstance(field_info, params.Body)
-    ):
-        return False
-    if field.sub_fields:
-        if not all(is_scalar_field(f) for f in field.sub_fields):
-            return False
-    return True
+    return (
+        False
+        if field.shape != SHAPE_SINGLETON
+        or lenient_issubclass(field.type_, BaseModel)
+        or lenient_issubclass(field.type_, sequence_types + (dict,))
+        or isinstance(field_info, params.Body)
+        else not field.sub_fields
+        or all(is_scalar_field(f) for f in field.sub_fields)
+    )
 
 
 def is_scalar_sequence_field(field: ModelField) -> bool:
@@ -235,9 +230,7 @@ def is_scalar_sequence_field(field: ModelField) -> bool:
                 if not is_scalar_field(sub_field):
                     return False
         return True
-    if lenient_issubclass(field.type_, sequence_types):
-        return True
-    return False
+    return bool(lenient_issubclass(field.type_, sequence_types))
 
 
 def get_typed_signature(call: Callable[..., Any]) -> inspect.Signature:
@@ -252,8 +245,7 @@ def get_typed_signature(call: Callable[..., Any]) -> inspect.Signature:
         )
         for param in signature.parameters.values()
     ]
-    typed_signature = inspect.Signature(typed_params)
-    return typed_signature
+    return inspect.Signature(typed_params)
 
 
 def get_typed_annotation(param: inspect.Parameter, globalns: Dict[str, Any]) -> Any:
@@ -306,10 +298,7 @@ def get_dependant(
             assert is_scalar_field(
                 field=param_field
             ), "Path params must be of one of the supported types"
-            if isinstance(param.default, params.Path):
-                ignore_default = False
-            else:
-                ignore_default = True
+            ignore_default = not isinstance(param.default, params.Path)
             param_field = get_param_field(
                 param=param,
                 param_name=param_name,
@@ -367,7 +356,7 @@ def get_param_field(
 ) -> ModelField:
     default_value = Required
     had_schema = False
-    if not param.default == param.empty and ignore_default is False:
+    if param.default != param.empty and not ignore_default:
         default_value = param.default
     if isinstance(default_value, FieldInfo):
         had_schema = True
@@ -383,9 +372,7 @@ def get_param_field(
     else:
         field_info = default_field_info(default_value)
     required = default_value == Required
-    annotation: Any = Any
-    if not param.annotation == param.empty:
-        annotation = param.annotation
+    annotation = param.annotation if param.annotation != param.empty else Any
     annotation = get_annotation_from_field_info(annotation, field_info, param_name)
     if not field_info.alias and getattr(field_info, "convert_underscores", None):
         alias = param.name.replace("_", "-")
@@ -564,7 +551,7 @@ async def solve_dependencies(
     cookie_values, cookie_errors = request_params_to_args(
         dependant.cookie_params, request.cookies
     )
-    values.update(path_values)
+    values |= path_values
     values.update(query_values)
     values.update(header_values)
     values.update(cookie_values)
@@ -652,11 +639,7 @@ async def request_body_to_args(
 
         for field in required_params:
             loc: Tuple[str, ...]
-            if field_alias_omitted:
-                loc = ("body",)
-            else:
-                loc = ("body", field.alias)
-
+            loc = ("body", ) if field_alias_omitted else ("body", field.alias)
             value: Optional[Any] = None
             if received_body is not None:
                 if (
@@ -711,8 +694,7 @@ async def request_body_to_args(
 
 
 def get_missing_field_error(loc: Tuple[str, ...]) -> ErrorWrapper:
-    missing_field_error = ErrorWrapper(MissingError(), loc=loc)
-    return missing_field_error
+    return ErrorWrapper(MissingError(), loc=loc)
 
 
 def get_schema_compatible_field(*, field: ModelField) -> ModelField:
@@ -751,7 +733,7 @@ def get_body_field(*, dependant: Dependant, name: str) -> Optional[ModelField]:
     # That is combined (embedded) with other body fields
     for param in flat_dependant.body_params:
         setattr(param.field_info, "embed", True)
-    model_name = "Body_" + name
+    model_name = f"Body_{name}"
     BodyModel: Type[BaseModel] = create_model(model_name)
     for f in flat_dependant.body_params:
         BodyModel.__fields__[f.name] = get_schema_compatible_field(field=f)
